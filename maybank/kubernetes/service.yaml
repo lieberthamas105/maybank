@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mybank-api-service
+  namespace: finance-apps
+  labels:
+    app: mybank-api
+spec:
+  selector:
+    app: mybank-api
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
+  type: ClusterIP

@@ -1,0 +1,169 @@
+pipeline {
+    agent any
+
+    environment {
+        // Konfigurasi Docker registry
+        DOCKER_REGISTRY = 'your-registry.io'
+        DOCKER_IMAGE_NAME = "mybank-api"
+        DOCKER_IMAGE_TAG = "${env.BUILD_NUMBER}"
+        
+        // Konfigurasi Kubernetes
+        KUBERNETES_NAMESPACE = 'finance-apps'
+        
+        // Konfigurasi GitOps
+        GIT_GITOPS_REPO = 'https://github.com/your-org/mybank-gitops.git'
+        GIT_GITOPS_BRANCH = 'main'
+        
+        // Kredensial Docker registry
+        DOCKER_CREDENTIALS = credentials('docker-registry-credentials')
+    }
+
+    stages {
+        stage('Checkout Code') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Build & Unit Tests') {
+            steps {
+                sh './mvnw clean package'
+            }
+            post {
+                always {
+                    junit '**/target/surefire-reports/*.xml'
+                }
+            }
+        }
+
+        stage('Code Quality') {
+            steps {
+                sh './mvnw sonar:sonar -Dsonar.projectKey=mybank -Dsonar.host.url=http://your-sonarqube-url'
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    def imageFullName = "${DOCKER_REGISTRY}/${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG}"
+                    sh "docker build -t ${imageFullName} ."
+                    
+                    // Login ke Docker registry
+                    sh "echo ${DOCKER_CREDENTIALS_PSW} | docker login ${DOCKER_REGISTRY} -u ${DOCKER_CREDENTIALS_USR} --password-stdin"
+                    
+                    // Push image ke registry
+                    sh "docker push ${imageFullName}"
+                    
+                    // Tag juga sebagai latest
+                    sh "docker tag ${imageFullName} ${DOCKER_REGISTRY}/${DOCKER_IMAGE_NAME}:latest"
+                    sh "docker push ${DOCKER_REGISTRY}/${DOCKER_IMAGE_NAME}:latest"
+                    
+                    echo "Docker image built and pushed: ${imageFullName}"
+                }
+            }
+        }
+
+        stage('Deploy to Development') {
+            steps {
+                script {
+                    // Clone GitOps repository
+                    dir('gitops-repo') {
+                        git branch: "${GIT_GITOPS_BRANCH}", url: "${GIT_GITOPS_REPO}"
+                        
+                        // Update image tag in Kubernetes manifest
+                        sh "sed -i 's|image: ${DOCKER_REGISTRY}/${DOCKER_IMAGE_NAME}:.*|image: ${DOCKER_REGISTRY}/${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG}|g' kubernetes/dev/mybank/deployment.yaml"
+                        
+                        // Commit and push changes
+                        sh "git config user.email 'jenkins@example.com'"
+                        sh "git config user.name 'Jenkins CI'"
+                        sh "git add kubernetes/dev/mybank/deployment.yaml"
+                        sh "git commit -m 'Update mybank image to ${DOCKER_IMAGE_TAG} [skip ci]'"
+                        
+                        withCredentials([usernamePassword(credentialsId: 'gitops-repo-credentials', passwordVariable: 'GIT_PASSWORD', usernameVariable: 'GIT_USERNAME')]) {
+                            sh "git push https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/your-org/mybank-gitops.git ${GIT_GITOPS_BRANCH}"
+                        }
+                    }
+                    echo "Kubernetes manifests updated in GitOps repo for development environment"
+                }
+            }
+        }
+
+        stage('Integration Tests') {
+            steps {
+                // Tunggu sampai deployment selesai
+                sh "sleep 30"
+                
+                // Jalankan integration tests
+                sh "./mvnw verify -P integration-test"
+            }
+        }
+
+        stage('Manual Approval for Production') {
+            when {
+                branch 'main'
+            }
+            steps {
+                timeout(time: 1, unit: 'DAYS') {
+                    input message: 'Deploy ke Production?', ok: 'Yes'
+                }
+            }
+        }
+
+        stage('Deploy to Production') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    // Clone GitOps repository
+                    dir('gitops-repo') {
+                        git branch: "${GIT_GITOPS_BRANCH}", url: "${GIT_GITOPS_REPO}"
+                        
+                        // Update image tag in Kubernetes manifest
+                        sh "sed -i 's|image: ${DOCKER_REGISTRY}/${DOCKER_IMAGE_NAME}:.*|image: ${DOCKER_REGISTRY}/${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG}|g' kubernetes/prod/mybank/deployment.yaml"
+                        
+                        // Commit and push changes
+                        sh "git config user.email 'jenkins@example.com'"
+                        sh "git config user.name 'Jenkins CI'"
+                        sh "git add kubernetes/prod/mybank/deployment.yaml"
+                        sh "git commit -m 'Update production mybank image to ${DOCKER_IMAGE_TAG} [skip ci]'"
+                        
+                        withCredentials([usernamePassword(credentialsId: 'gitops-repo-credentials', passwordVariable: 'GIT_PASSWORD', usernameVariable: 'GIT_USERNAME')]) {
+                            sh "git push https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/your-org/mybank-gitops.git ${GIT_GITOPS_BRANCH}"
+                        }
+                    }
+                    echo "Kubernetes manifests updated in GitOps repo for production environment"
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            // Cleanup workspace
+            cleanWs()
+        }
+        success {
+            echo "Pipeline berhasil dieksekusi!"
+            
+            // Kirim notifikasi sukses
+            emailext (
+                subject: "BUILD SUCCESS: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]'",
+                body: """<p>BUILD SUCCESS: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]':</p>
+                <p>Check console output at <a href='${env.BUILD_URL}'>${env.JOB_NAME} [${env.BUILD_NUMBER}]</a></p>""",
+                recipientProviders: [[$class: 'DevelopersRecipientProvider']]
+            )
+        }
+        failure {
+            echo "Pipeline gagal!"
+            
+            // Kirim notifikasi kegagalan
+            emailext (
+                subject: "BUILD FAILURE: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]'",
+                body: """<p>BUILD FAILURE: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]':</p>
+                <p>Check console output at <a href='${env.BUILD_URL}'>${env.JOB_NAME} [${env.BUILD_NUMBER}]</a></p>""",
+                recipientProviders: [[$class: 'DevelopersRecipientProvider']]
+            )
+        }
+    }
+}

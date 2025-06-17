@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mybank-config
+  namespace: finance-apps
+data:
+  db-host: "mybank-postgres.finance-apps.svc.cluster.local"
+  db-name: "mybankdb"
+  db-user: "mybankuser"
+  redis-host: "mybank-redis.finance-apps.svc.cluster.local"
+  app-properties: |
+    spring.jpa.hibernate.ddl-auto=validate
+    spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect
+    spring.datasource.hikari.maximum-pool-size=10
+    spring.datasource.hikari.minimum-idle=5
+    spring.cache.type=redis
+    logging.level.com.mybank=INFO
